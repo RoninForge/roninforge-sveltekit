@@ -1,0 +1,209 @@
+---
+description: "Svelte 5 reactivity traps that LLMs hit: $effect runs only in the browser (never SSR; do not initialise SSR-visible state in it), reads inside $effect after the first await are NOT tracked (capture them synchronously up front), $effect that reads and writes the same $state creates an infinite loop (wrap reads in untrack from 'svelte'), $effect used to derive a value should be $derived instead, $state for arrays >1000 elements should be $state.raw with replacement instead of mutation, destructuring a $state proxy captures a snapshot (lose reactivity in the local), $bindable() required to mutate a prop in a child, bind:this targets must be $state to be readable as reactive. Companion to sveltekit-anti-patterns rule entries #9, #10, #11, #12, #13, #14, #15, #38."
+globs: "**/*.svelte,**/*.svelte.ts,**/*.svelte.js"
+alwaysApply: false
+---
+
+# Svelte 5 Reactivity Traps
+
+Cursor: Svelte 5's runes-based reactivity has eight common traps that LLMs trained on Svelte 4 (or the early `next` previews) consistently hit. Target: `svelte ^5.55.7`.
+
+The companion `sveltekit-anti-patterns` rule rejects the exact code shapes (entries #9, #10, #11, #12, #13, #14, #15, #38).
+
+## Trap 1: `$effect` runs only in the browser
+
+`$effect` is a browser-side mechanism. It does not execute during SSR. State you mutate inside it is `undefined` in the SSR HTML, which produces a hydration mismatch when the effect runs after hydration.
+
+If a value must be present in the SSR markup, compute it in `+page.ts` / `+page.server.ts` `load` and pass it down as a prop.
+
+```svelte
+<!-- BAD: empty in SSR HTML, then flashes in after hydration -->
+<script lang="ts">
+  let now = $state('')
+  $effect(() => { now = new Date().toISOString() })
+</script>
+<p>{now}</p>
+```
+
+```ts
+// GOOD - +page.ts
+import type { PageLoad } from './$types'
+export const load: PageLoad = async () => ({ now: new Date().toISOString() })
+```
+
+```svelte
+<script lang="ts">
+  import type { PageData } from './$types'
+  let { data }: { data: PageData } = $props()
+</script>
+<p>{data.now}</p>
+```
+
+## Trap 2: reads after `await` inside `$effect` are NOT tracked
+
+`$effect` only tracks state read synchronously before the first `await`. Reads after the await are dead weight.
+
+```svelte
+<!-- BAD - effect does not re-run when `other` changes -->
+<script lang="ts">
+  let id = $state('a')
+  let other = $state('x')
+  $effect(async () => {
+    await fetch(`/api/${id}`)  // tracks id
+    console.log(other)         // does NOT track other
+  })
+</script>
+```
+
+```svelte
+<!-- GOOD - read everything you need to track up front -->
+<script lang="ts">
+  let id = $state('a')
+  let other = $state('x')
+  $effect(() => {
+    const i = id
+    const o = other  // tracked synchronously
+    void (async () => {
+      await fetch(`/api/${i}`)
+      console.log(o)
+    })()
+  })
+</script>
+```
+
+## Trap 3: `$effect` infinite loop (read + write same `$state`)
+
+```svelte
+<!-- BAD - infinite loop -->
+<script lang="ts">
+  let value = $state(0)
+  $effect(() => { value = value + 1 })  // tracks value, writes value, repeats
+</script>
+```
+
+```svelte
+<!-- GOOD - if you genuinely need a write that does not retrigger -->
+<script lang="ts">
+  import { untrack } from 'svelte'
+  let value = $state(0)
+  let trigger = $state(0)
+  $effect(() => {
+    trigger
+    value = untrack(() => value) + 1
+  })
+</script>
+```
+
+## Trap 4: `$effect` for derivation should be `$derived`
+
+If the new value is a pure function of other state, it is a derivation. Effects are for SIDE effects.
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let count = $state(0)
+  let doubled = $state(0)
+  $effect(() => { doubled = count * 2 })
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let count = $state(0)
+  let doubled = $derived(count * 2)
+</script>
+```
+
+`$derived` is lazy (recomputed on read), pure, and stays in sync without an effect run.
+
+## Trap 5: `$state.raw` for large arrays
+
+`$state` recursively proxies. For 50,000 row tables the proxy overhead dominates. `$state.raw` opts out; mutate by replacement.
+
+```ts
+// BAD - 50,000 rows, each row proxied
+let rows = $state<Row[]>(loadFiftyThousandRows())
+```
+
+```ts
+// GOOD
+let rows = $state.raw<Row[]>(loadFiftyThousandRows())
+function add(r: Row) { rows = [...rows, r] }
+```
+
+Rule of thumb: if you would copy-on-write the value anyway (Redux style), use `$state.raw`.
+
+## Trap 6: destructuring a `$state` proxy captures a snapshot
+
+```ts
+// BAD
+const cart = $state({ items: [] as Item[], total: 0 })
+const { items } = cart
+// Reactive consumers reading `items` (the local) re-run only if the local is replaced.
+// Mutating `items.push(...)` mutates the proxied array (still reactive for cart.items reads),
+// but reading `items` directly in a component template will NOT re-run on cart.items replacement.
+```
+
+```ts
+// GOOD - read through the proxy
+const cart = $state({ items: [] as Item[], total: 0 })
+function add(i: Item) { cart.items.push(i) }
+// Template: {#each cart.items as item}
+```
+
+## Trap 7: mutating a non-`$bindable` prop in the child
+
+Props are read-only in the child by default. Mutating throws in dev. Mark `$bindable()` if you want two-way binding.
+
+```svelte
+<!-- BAD - throws in dev -->
+<script lang="ts">
+  let { value } = $props()
+  function reset() { value = '' }
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let { value = $bindable('') }: { value?: string } = $props()
+  function reset() { value = '' }
+</script>
+```
+
+## Trap 8: `bind:this` to a non-`$state` variable
+
+`bind:this` writes to its target after mount. In runes mode, the target must be `$state` for consumers to re-run on the assignment.
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let el: HTMLDivElement
+  $effect(() => { console.log(el?.offsetWidth) })  // never sees el
+</script>
+<div bind:this={el}>...</div>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let el = $state<HTMLDivElement | undefined>()
+  $effect(() => { if (el) console.log(el.offsetWidth) })
+</script>
+<div bind:this={el}>...</div>
+```
+
+## Quick decision tree
+
+| Need                                                | Use                       |
+| --------------------------------------------------- | ------------------------- |
+| Component-local reactive value                      | `$state`                  |
+| Pure derivation of other state                      | `$derived`                |
+| Browser-side side effect (DOM, timer, fetch)        | `$effect`                 |
+| Same as `$effect` but BEFORE DOM update             | `$effect.pre`             |
+| Two-way bindable child prop                         | `$bindable()`             |
+| Large dataset, replacement semantics                | `$state.raw`              |
+| Read state without tracking                         | `untrack(() => state)`    |
+| Plain (non-proxy) snapshot of reactive state        | `$state.snapshot(state)`  |
+| SSR-visible value                                   | `load` in `+page.ts`      |

@@ -1,0 +1,200 @@
+---
+description: "SvelteKit 2 + Svelte 5 testing stack: vitest 4 (default pool flipped to 'forks' from v3 'threads'), @testing-library/svelte 5 (render() / screen / fireEvent / cleanup; uses Svelte 5 mount() under the hood, NOT new App({ target })), happy-dom over jsdom for speed, @sveltejs/vite-plugin-svelte for the .svelte file resolver in vitest, mocks for $app/state and $app/navigation via vi.mock, @playwright/test 1.60 for E2E (testDir 'e2e/', baseURL via webServer, Playwright runs the built preview server), no Cypress. Companion to sveltekit-anti-patterns rule entry #40."
+globs: "**/*.test.{ts,js},**/*.spec.{ts,js},vitest.config.{ts,js},playwright.config.{ts,js},e2e/**/*"
+alwaysApply: false
+---
+
+# SvelteKit 2 + Svelte 5 Testing
+
+Cursor: the documented Svelte 5 + SvelteKit 2 testing stack is `vitest ^4.1.6` + `@testing-library/svelte ^5.3.1` + `happy-dom` for unit / component tests and `@playwright/test ^1.60.0` for E2E. Cypress is NOT the recommended path. Target: those exact versions.
+
+The companion `sveltekit-anti-patterns` rule rejects `mount(App)` without unmount and `new App({ target })` (entry #40).
+
+## `vitest.config.ts`
+
+```ts
+import { defineConfig } from 'vitest/config'
+import { sveltekit } from '@sveltejs/kit/vite'
+
+export default defineConfig({
+  plugins: [sveltekit()],
+  test: {
+    pool: 'forks',                // Vitest 4 default; declared for clarity
+    poolOptions: { forks: { singleFork: false } },
+    environment: 'happy-dom',
+    globals: false,
+    setupFiles: ['./vitest-setup.ts'],
+    coverage: { provider: 'v8' },
+  },
+})
+```
+
+`vitest-setup.ts`:
+
+```ts
+import '@testing-library/jest-dom/vitest'
+```
+
+Vitest 4 changed the default `pool` from `threads` (v3) to `forks`. Declare it explicitly so reproducibility does not depend on the default.
+
+## Component test with `@testing-library/svelte`
+
+```ts
+// src/lib/components/Counter.test.ts
+import { render, screen, fireEvent } from '@testing-library/svelte'
+import { test, expect } from 'vitest'
+import Counter from './Counter.svelte'
+
+test('starts at 0', () => {
+  render(Counter)
+  expect(screen.getByRole('button')).toHaveTextContent('0')
+})
+
+test('increments on click', async () => {
+  render(Counter)
+  const btn = screen.getByRole('button')
+  await fireEvent.click(btn)
+  expect(btn).toHaveTextContent('1')
+})
+
+test('accepts initial prop', () => {
+  render(Counter, { props: { initial: 7 } })
+  expect(screen.getByRole('button')).toHaveTextContent('7')
+})
+```
+
+`render()` calls `mount()` under the hood and registers `cleanup()` to unmount on teardown.
+
+NEVER write `new Counter({ target })` (Svelte 4 instance API, removed) or hand-roll `mount(Counter, { target })` without `unmount()` in test code.
+
+## Mocking `$app/state` and `$app/navigation`
+
+```ts
+import { render, screen } from '@testing-library/svelte'
+import { test, expect, vi } from 'vitest'
+
+vi.mock('$app/state', () => ({
+  page: {
+    url: new URL('http://localhost/posts/hello'),
+    params: { slug: 'hello' },
+    route: { id: '/posts/[slug]' },
+    status: 200,
+    data: {},
+    form: null,
+    state: {},
+  },
+  navigating: { type: null },
+  updated: { current: false },
+}))
+
+vi.mock('$app/navigation', () => ({
+  goto: vi.fn(),
+  invalidate: vi.fn(),
+  pushState: vi.fn(),
+}))
+
+import PostBreadcrumb from './PostBreadcrumb.svelte'
+
+test('reads slug from page.params', () => {
+  render(PostBreadcrumb)
+  expect(screen.getByText('hello')).toBeInTheDocument()
+})
+```
+
+## Testing `.svelte.ts` state modules
+
+```ts
+// src/lib/state/cart.svelte.ts
+class Cart {
+  items = $state<Item[]>([])
+  add(i: Item) { this.items.push(i) }
+}
+export const cart = new Cart()
+```
+
+```ts
+// src/lib/state/cart.test.ts
+import { test, expect } from 'vitest'
+import { cart } from './cart.svelte'
+
+test('add pushes an item', () => {
+  cart.items.length = 0
+  cart.add({ id: '1', price: 10 })
+  expect(cart.items).toHaveLength(1)
+})
+```
+
+`.svelte.ts` modules need `@sveltejs/vite-plugin-svelte` (which `sveltekit()` includes) so the runes compile.
+
+## Server-load test
+
+Pure functions, no Vitest plugin needed beyond the default:
+
+```ts
+// src/routes/posts/[slug]/+page.server.test.ts
+import { test, expect, vi } from 'vitest'
+import { load } from './+page.server'
+
+test('returns post for valid slug', async () => {
+  const event = {
+    params: { slug: 'hello' },
+    locals: { db: { posts: { findBySlug: vi.fn().mockResolvedValue({ id: '1', slug: 'hello', title: 'Hi' }) } } },
+  } as never
+  const result = await load(event)
+  expect(result).toEqual({ post: { id: '1', slug: 'hello', title: 'Hi' } })
+})
+```
+
+## Playwright E2E
+
+`playwright.config.ts`:
+
+```ts
+import { defineConfig } from '@playwright/test'
+
+export default defineConfig({
+  testDir: 'e2e',
+  use: { baseURL: 'http://localhost:4173' },
+  webServer: {
+    command: 'npm run build && npm run preview',
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+})
+```
+
+`e2e/login.spec.ts`:
+
+```ts
+import { test, expect } from '@playwright/test'
+
+test('login redirects to dashboard', async ({ page }) => {
+  await page.goto('/login')
+  await page.fill('input[name="email"]', 'a@b.com')
+  await page.fill('input[name="password"]', 'hunter22')
+  await page.click('button[type="submit"]')
+  await expect(page).toHaveURL('/dashboard')
+})
+```
+
+## `package.json` scripts
+
+```json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  }
+}
+```
+
+## Why these matter for LLM output
+
+Pre-2024 trained models will produce:
+
+- `new App({ target: document.body })` for component tests (anti-pattern #40, removed in Svelte 5)
+- Hand-rolled `mount(App, { target })` without `unmount()` (anti-pattern #40, leaks across tests)
+- Cypress component config as the recommended path (NOT the documented Svelte 5 stack)
+- `vitest.config.ts` without `pool: 'forks'` (Vitest 4 default flipped from v3 `'threads'`)

@@ -1,0 +1,208 @@
+---
+description: "Svelte 5 events and snippets model: onclick / oninput / onsubmit are plain DOM attributes (no on: namespace, no event modifiers), createEventDispatcher is replaced by callback props (parent passes onsave={fn}, child calls onsave(payload)), <slot /> and <slot name='x' /> are replaced by snippets ({@render children?.()} for default, named snippet props for named), {#snippet name(arg)}...{/snippet} declares reusable template fragments, the Snippet<[T]> type from 'svelte' types snippet props. Companion to sveltekit-anti-patterns rule entries #4, #5, #6, #7, #34, #37."
+globs: "**/*.svelte"
+alwaysApply: false
+---
+
+# Svelte 5 Events and Snippets
+
+Cursor: Svelte 5 dropped four Svelte 4 mechanisms in one go: the `on:event` directive namespace, event modifiers, `createEventDispatcher`, and the `<slot>` element. The replacements are plain DOM attributes, callback props, and snippets.
+
+The companion `sveltekit-anti-patterns` rule rejects the Svelte 4 shapes (entries #4, #5, #6, #7, #34, #37). This rule explains the positive form.
+
+## DOM event handlers: `onclick`, `oninput`, `onsubmit`
+
+Svelte 5 uses lowercase DOM property names directly. They behave the same as a React `onClick` (camelCase aside) or a vanilla HTML attribute.
+
+```svelte
+<script lang="ts">
+  let count = $state(0)
+  const inc = () => count++
+</script>
+
+<button onclick={inc}>{count}</button>
+<input oninput={(e) => console.log(e.currentTarget.value)} />
+<form onsubmit={(e) => { e.preventDefault(); save() }}>...</form>
+```
+
+There is NO event modifier syntax. Handle it in the function:
+
+```svelte
+<a onclick={(e) => { e.stopPropagation(); openDialog() }}>Open</a>
+```
+
+For one-shot listeners, track it yourself:
+
+```svelte
+<script lang="ts">
+  let fired = $state(false)
+  function once(e: Event) {
+    if (fired) return
+    fired = true
+    save()
+  }
+</script>
+<button onclick={once}>Save once</button>
+```
+
+Capture phase: prefix with `on` and add `capture`:
+
+```svelte
+<button onclickcapture={handleCapture}>Capture</button>
+```
+
+## Component callback props (replaces `createEventDispatcher`)
+
+The child accepts a function prop. The parent passes it. There is no `dispatch`, no `CustomEvent`, no `e.detail`.
+
+```svelte
+<!-- child: Picker.svelte -->
+<script lang="ts">
+  type Props = { onselect: (id: string) => void }
+  let { onselect }: Props = $props()
+
+  function pick(id: string) {
+    onselect(id)
+  }
+</script>
+
+<button onclick={() => pick('a')}>A</button>
+<button onclick={() => pick('b')}>B</button>
+```
+
+```svelte
+<!-- parent -->
+<Picker onselect={(id) => console.log('picked', id)} />
+```
+
+Optional callback, with optional chaining:
+
+```svelte
+<script lang="ts">
+  type Props = { onsave?: (value: string) => void }
+  let { onsave }: Props = $props()
+</script>
+
+<button onclick={() => onsave?.('hello')}>Save</button>
+```
+
+Multiple events:
+
+```svelte
+<!-- child -->
+<script lang="ts">
+  type Props = {
+    onsave: (v: string) => void
+    oncancel: () => void
+    onchange?: (v: string) => void
+  }
+  let { onsave, oncancel, onchange }: Props = $props()
+</script>
+```
+
+## Snippets replace `<slot>`
+
+The default slot is a prop named `children`. Render with `{@render children?.()}`. Named slots are individual snippet props.
+
+```svelte
+<!-- child: Card.svelte -->
+<script lang="ts">
+  import type { Snippet } from 'svelte'
+  type Props = {
+    header?: Snippet
+    children?: Snippet
+    footer?: Snippet<[year: number]>
+  }
+  let { header, children, footer }: Props = $props()
+</script>
+
+<article class="card">
+  {#if header}
+    <header>{@render header()}</header>
+  {/if}
+
+  <div class="body">{@render children?.()}</div>
+
+  {#if footer}
+    <footer>{@render footer(2026)}</footer>
+  {/if}
+</article>
+```
+
+```svelte
+<!-- parent -->
+<Card>
+  {#snippet header()}<h2>Title</h2>{/snippet}
+
+  <p>Body content here.</p>
+
+  {#snippet footer(year)}
+    <small>Copyright {year}</small>
+  {/snippet}
+</Card>
+```
+
+## Snippet typing with `Snippet<[T1, T2, ...]>`
+
+The `Snippet` generic type from `svelte` parameterises the tuple of snippet arguments.
+
+```ts
+import type { Snippet } from 'svelte'
+
+type Props = {
+  rows: Row[]
+  // Snippet that takes one Row argument:
+  row: Snippet<[row: Row, index: number]>
+  // Snippet that takes no arguments:
+  empty?: Snippet
+}
+```
+
+## Reusable snippets via `{#snippet}` blocks at template scope
+
+Snippets can also be declared at the top level of a `<template>` and reused anywhere a snippet is expected.
+
+```svelte
+<script lang="ts">
+  let items = $state([
+    { id: '1', label: 'A' },
+    { id: '2', label: 'B' },
+  ])
+</script>
+
+{#snippet row(label: string)}
+  <li class="row">{label}</li>
+{/snippet}
+
+<ul>
+  {#each items as item}
+    {@render row(item.label)}
+  {/each}
+</ul>
+```
+
+## Why these matter for LLM output
+
+Pre-October-2024 trained models will produce:
+
+- `<button on:click={handle}>` (anti-pattern #4)
+- `<form on:submit|preventDefault={save}>` (anti-pattern #5)
+- `import { createEventDispatcher } from 'svelte'` (anti-pattern #6)
+- `<slot />` and `<slot name="x" />` (anti-pattern #7)
+- `function onSelect(e: CustomEvent<{ id: string }>)` (anti-pattern #34)
+
+Each is the Svelte 4 documented form. Each compiles to a warning or error in Svelte 5 runes mode.
+
+## Migration cheat sheet
+
+| Svelte 4                                            | Svelte 5                                          |
+| --------------------------------------------------- | ------------------------------------------------- |
+| `<button on:click={fn}>`                            | `<button onclick={fn}>`                           |
+| `<form on:submit\|preventDefault={fn}>`             | `<form onsubmit={(e) => { e.preventDefault(); fn(e) }}>` |
+| `dispatch('save', payload)`                         | `onsave?.(payload)`                               |
+| `e.detail.foo` in parent handler                    | `(foo) => ...` plain function arg                 |
+| `<slot />`                                          | `{@render children?.()}`                          |
+| `<slot name="header" />`                            | `{@render header?.()}`                            |
+| `<svelte:fragment slot="header">...</...>`          | `{#snippet header()}...{/snippet}`                |
+| `let:item={item}` slot prop                         | `{#snippet row(item)}...{/snippet}` + `{@render row(item)}` |
+| `CustomEvent<{ id: string }>`                       | `(id: string) => void`                            |

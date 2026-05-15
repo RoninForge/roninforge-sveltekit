@@ -1,0 +1,191 @@
+---
+description: "SvelteKit 2 core changes from SvelteKit 1: error() and redirect() are no longer thrown by you (just call them, the helpers throw internally), cookies.set / cookies.delete require explicit path: '/' (no default), top-level promises in load are no longer auto-awaited (use await or Promise.all), goto() rejects external URLs (use window.location.href), $page from $app/stores deprecated in 2.12+ (use page from $app/state), resolvePath renamed resolveRoute in $app/paths, paths.relative default flipped from false to true, reroute hook for URL aliasing, shallow routing via pushState / replaceState from $app/navigation. Companion to sveltekit-anti-patterns rule entries #17, #18, #19, #20, #21, #22, #23, #26."
+globs: "src/routes/**/*.{ts,js,svelte},src/hooks.ts,src/hooks.js,src/hooks.{server,client}.{ts,js},svelte.config.js,svelte.config.ts"
+alwaysApply: false
+---
+
+# SvelteKit 2 Core
+
+Cursor: SvelteKit 2 (December 2023, with `$app/state` added in 2.12, ongoing minor releases through 2.60.1) introduced breaking changes to `error()`, `redirect()`, `cookies`, `goto()`, top-level `load` promises, and the `$app/stores` -> `$app/state` migration. Target: `@sveltejs/kit ^2.60.1`.
+
+The companion `sveltekit-anti-patterns` rule rejects the SvelteKit 1 shapes (entries #17, #18, #19, #20, #21, #22, #23, #26). This rule explains the positive form.
+
+## `error()` and `redirect()` no longer thrown by you
+
+SvelteKit 2 made `error()` and `redirect()` throw internally. Drop `throw`. The functions never return so TypeScript can narrow types after them. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#redirect-and-error-are-no-longer-thrown-by-you
+
+```ts
+import { error, redirect } from '@sveltejs/kit'
+import type { PageServerLoad } from './$types'
+
+export const load: PageServerLoad = async ({ params, locals }) => {
+  const post = await locals.db.posts.findById(params.id)
+  if (!post) error(404, 'Post not found')   // throws Error internally
+  if (!locals.user) redirect(303, '/login')  // throws Redirect internally
+  return { post }
+}
+```
+
+If you wrap in `try/catch`, re-throw redirects and errors:
+
+```ts
+import { error, redirect, isRedirect, isHttpError } from '@sveltejs/kit'
+
+try {
+  redirect(303, '/login')
+} catch (e) {
+  if (isRedirect(e) || isHttpError(e)) throw e
+  // handle other failures
+}
+```
+
+## `cookies.set` / `cookies.delete` require `path`
+
+SvelteKit 2 removed the implicit `path: '/'` default. Set it explicitly. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#path-is-required-when-setting-cookies
+
+```ts
+cookies.set('session', token, {
+  path: '/',
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax',
+  maxAge: 60 * 60 * 24 * 7,
+})
+
+cookies.delete('session', { path: '/' })
+```
+
+## Top-level promises in `load` are no longer auto-awaited
+
+SvelteKit 1 auto-awaited promises returned at the top level of `load`. SvelteKit 2 surfaces them as `Promise<T>` in your data. Use `Promise.all` for parallel fetches. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#top-level-promises-are-no-longer-awaited
+
+```ts
+import type { PageLoad } from './$types'
+
+export const load: PageLoad = async ({ fetch }) => {
+  const [posts, tags] = await Promise.all([
+    fetch('/api/posts').then(r => r.json()),
+    fetch('/api/tags').then(r => r.json()),
+  ])
+  return { posts, tags }
+}
+```
+
+If you genuinely want streaming, return the unawaited promise and consume it with `{#await}`:
+
+```ts
+export const load: PageLoad = async ({ fetch }) => {
+  return {
+    user: await fetch('/api/user').then(r => r.json()),
+    posts: fetch('/api/posts').then(r => r.json()),  // streamed
+  }
+}
+```
+
+```svelte
+<script lang="ts">
+  let { data } = $props()
+</script>
+<p>Hello {data.user.name}</p>
+{#await data.posts}
+  <p>Loading posts.</p>
+{:then posts}
+  <ul>{#each posts as p}<li>{p.title}</li>{/each}</ul>
+{/await}
+```
+
+## `goto()` rejects external URLs
+
+`goto()` is for in-app, client-side navigation. External URLs throw. Use `window.location.href`. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#goto-no-longer-accepts-external-urls
+
+```ts
+import { goto } from '$app/navigation'
+
+goto('/dashboard')                    // GOOD
+goto('/posts/123', { replaceState: true })  // GOOD
+window.location.href = 'https://stripe.example/checkout/abc'  // GOOD external
+```
+
+## `$app/state` replaces `$app/stores` (2.12+)
+
+`$app/state` exposes `page`, `navigating`, `updated` as plain reactive objects (no `$` prefix, no store subscription). Works inside and outside `<script>` blocks. Source: https://svelte.dev/docs/kit/$app-state
+
+```svelte
+<script lang="ts">
+  import { page, navigating, updated } from '$app/state'
+</script>
+
+<p>Path: {page.url.pathname}</p>
+<p>Param: {page.params.slug}</p>
+{#if navigating.type}<p>Navigating.</p>{/if}
+{#if updated.current}<button onclick={() => location.reload()}>Update available</button>{/if}
+```
+
+The Svelte 4 store form (`$page.url.pathname`) still works for backward compatibility but is deprecated for new code.
+
+## `resolvePath` renamed `resolveRoute`
+
+```ts
+import { resolveRoute } from '$app/paths'
+const href = resolveRoute('/posts/[slug]', { slug: 'hello' })
+```
+
+## `paths.relative` default flipped to `true`
+
+`svelte.config.js`:
+
+```js
+const config = {
+  kit: {
+    paths: { relative: true },  // SvelteKit 2 default
+  },
+}
+export default config
+```
+
+Set explicitly if your code depends on absolute paths.
+
+## `reroute` hook for URL aliasing
+
+The `reroute` hook (added in `@sveltejs/kit` 2.3) maps an incoming `URL` to a different SvelteKit route without an HTTP redirect. Useful for i18n, A/B routing, legacy path aliases. Source: https://svelte.dev/docs/kit/hooks#Universal-hooks-reroute
+
+```ts
+// src/hooks.ts (universal, runs on server AND client)
+import type { Reroute } from '@sveltejs/kit'
+
+export const reroute: Reroute = ({ url }) => {
+  if (url.pathname === '/about-us') return '/about'
+  if (url.pathname.startsWith('/blog/')) {
+    return url.pathname.replace('/blog/', '/posts/')
+  }
+}
+```
+
+## Shallow routing via `pushState` / `replaceState`
+
+For modal flows that should update the URL without a full navigation. Source: https://svelte.dev/docs/kit/shallow-routing
+
+```svelte
+<script lang="ts">
+  import { pushState } from '$app/navigation'
+  import { page } from '$app/state'
+
+  function openModal(id: string) {
+    pushState(`?modal=${id}`, { modal: id })
+  }
+</script>
+
+{#if page.state.modal}
+  <Dialog onclose={() => history.back()} />
+{/if}
+```
+
+## Why these matter for LLM output
+
+Pre-2024 trained models will produce:
+
+- `throw error(...)` / `throw redirect(...)` (anti-pattern #17)
+- `cookies.set('x', v, { httpOnly: true })` without `path` (anti-pattern #19)
+- Top-level unawaited promises returned from `load` (anti-pattern #20)
+- `$page` from `$app/stores` instead of `page` from `$app/state` (anti-pattern #22)
+- `resolvePath` instead of `resolveRoute` (anti-pattern #23)

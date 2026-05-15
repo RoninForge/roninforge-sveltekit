@@ -1,0 +1,223 @@
+---
+description: "Svelte 5 TypeScript canonical patterns: $props<T>() with inline type annotation OR exported type from sibling .ts (preferred for reuse), Snippet<[arg1, arg2]> tuple-arg generic from 'svelte' for typed snippets, Component<Props, Exports, Bindings> generic from 'svelte' for typing component references, satisfies PageLoad / PageServerLoad / LayoutLoad / Action for load and action exports, generics on components via <script lang='ts' generic='T extends ...'>, defineProps-style is NOT a Svelte concept (Vue), discriminated unions for variant props, type-narrowing on $bindable defaults. Companion to sveltekit-anti-patterns rule entries #34, #35, #39."
+globs: "**/*.svelte,**/*.svelte.ts,**/*.svelte.js,**/*.ts"
+alwaysApply: false
+---
+
+# Svelte 5 TypeScript
+
+Cursor: Svelte 5's runes were designed alongside TypeScript. The canonical typing patterns are inline annotations on `$props()`, the `Snippet<[...]>` generic for typed snippets, the `Component<...>` generic for typed component references, and `satisfies PageLoad` for load functions. Target: `svelte ^5.55.7`, `typescript ^6.0.3`.
+
+The companion `sveltekit-anti-patterns` rule rejects the Svelte 4 typing shapes (entries #34, #35, #39).
+
+## `$props()` with inline type
+
+Preferred form: declare the type inline on the destructure. Defaults via JS destructure.
+
+```svelte
+<script lang="ts">
+  let {
+    title,
+    count = 0,
+    variant = 'primary',
+  }: {
+    title: string
+    count?: number
+    variant?: 'primary' | 'secondary' | 'ghost'
+  } = $props()
+</script>
+```
+
+For complex props (or reuse), declare a separate `Props` type:
+
+```svelte
+<script lang="ts">
+  type Props = {
+    title: string
+    count?: number
+    onsave: (n: number) => void
+  }
+  let { title, count = 0, onsave }: Props = $props()
+</script>
+```
+
+Export it from a sibling `.ts` if multiple components share the shape:
+
+```ts
+// src/lib/components/Card.types.ts
+import type { Snippet } from 'svelte'
+
+export type CardProps = {
+  variant?: 'primary' | 'secondary'
+  header?: Snippet
+  children?: Snippet
+}
+```
+
+```svelte
+<script lang="ts">
+  import type { CardProps } from './Card.types'
+  let { variant = 'primary', header, children }: CardProps = $props()
+</script>
+```
+
+## Snippet typing with `Snippet<[...]>`
+
+The `Snippet` generic from `svelte` parameterises a tuple of snippet arguments.
+
+```ts
+import type { Snippet } from 'svelte'
+
+type Props = {
+  rows: Row[]
+  // Snippet that takes (row, index):
+  row: Snippet<[row: Row, index: number]>
+  // Snippet with no args:
+  empty?: Snippet
+  // Default children, no args:
+  children?: Snippet
+}
+```
+
+Render with `{@render row(item, i)}`. Optional snippets need optional chaining:
+
+```svelte
+{#each rows as item, i}
+  {@render row(item, i)}
+{:else}
+  {@render empty?.()}
+{/each}
+```
+
+## Component typing with `Component<Props, Exports, Bindings>`
+
+When you store a component reference in a typed variable (e.g. dynamic component dispatch), use the `Component` generic.
+
+```ts
+import type { Component } from 'svelte'
+import Button from './Button.svelte'
+import Link from './Link.svelte'
+
+type Variant = 'button' | 'link'
+
+const variants: Record<Variant, Component<{ label: string; onclick?: () => void }>> = {
+  button: Button,
+  link: Link,
+}
+```
+
+Render with `<svelte:component>` (Svelte 4) or directly with `{#if}` and the variable (Svelte 5):
+
+```svelte
+<script lang="ts">
+  let { variant }: { variant: Variant } = $props()
+  const C = variants[variant]
+</script>
+
+<C label="Click me" onclick={() => console.log('click')} />
+```
+
+## Generic components via `<script lang="ts" generic="T">`
+
+Declare type parameters on the script tag.
+
+```svelte
+<script lang="ts" generic="T extends { id: string }">
+  import type { Snippet } from 'svelte'
+
+  type Props = {
+    items: T[]
+    row: Snippet<[item: T]>
+    empty?: Snippet
+  }
+
+  let { items, row, empty }: Props = $props()
+</script>
+
+<ul>
+  {#each items as item (item.id)}
+    {@render row(item)}
+  {:else}
+    {@render empty?.()}
+  {/each}
+</ul>
+```
+
+Parent inference: TypeScript infers `T` from the `items` prop, and the snippet `row(item)` is typed.
+
+## `satisfies PageLoad` for load functions
+
+Two equivalent forms; both produce the same generated `$types`:
+
+```ts
+// Form A: explicit type on the export
+import type { PageLoad } from './$types'
+export const load: PageLoad = async ({ params, fetch }) => {
+  return { slug: params.slug }
+}
+```
+
+```ts
+// Form B: satisfies (preserves the inferred return type)
+import type { PageLoad } from './$types'
+export const load = (async ({ params, fetch }) => {
+  return { slug: params.slug }
+}) satisfies PageLoad
+```
+
+Form B is preferred when you want the literal return type to flow through to `$page.data` / `data` in `+page.svelte`.
+
+`satisfies Actions` for form actions:
+
+```ts
+import type { Actions } from './$types'
+export const actions = {
+  default: async ({ request }) => { /* ... */ },
+} satisfies Actions
+```
+
+## Discriminated unions for variant props
+
+```ts
+type LinkProps =
+  | { variant: 'internal'; href: `/${string}` }
+  | { variant: 'external'; href: `https://${string}`; target?: '_blank' }
+```
+
+```svelte
+<script lang="ts">
+  let props: LinkProps = $props()
+  // Narrowed:
+  if (props.variant === 'external') {
+    // props.target available
+  }
+</script>
+```
+
+## `$bindable` typing
+
+Defaults narrow the bindable type:
+
+```svelte
+<script lang="ts">
+  let { value = $bindable<string>('') }: { value?: string } = $props()
+</script>
+```
+
+Without a default, the value is `T | undefined`:
+
+```svelte
+<script lang="ts">
+  let { value = $bindable<string | undefined>(undefined) }: { value?: string } = $props()
+</script>
+```
+
+## Why these matter for LLM output
+
+Pre-2024 trained models will produce:
+
+- `e: CustomEvent<{ id: string }>` for child-event payloads (anti-pattern #34)
+- `withDefaults($props<Props>(), { ... })` (anti-pattern #35)
+- `+page.ts` exports with no `PageLoad` annotation (anti-pattern #39)
+
+Each is a Svelte 4 / Vue holdover or a missed type-safety opportunity.

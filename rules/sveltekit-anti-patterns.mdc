@@ -1,0 +1,849 @@
+---
+description: "40 SvelteKit 2 + Svelte 5 (Runes) LLM regressions with BAD / GOOD pairs. Catches let count = 0 used as component state without $state (silently non-reactive in runes mode), $: reactive statements in runes-mode files, export let prop in any runes file, on:click and any on:event directive (use onclick), event modifiers |preventDefault / |stopPropagation / |self / |once (handle in the function), createEventDispatcher + dispatch (use callback props), <slot /> and <slot name> (use {@render children?.()} and snippets), component instantiation via new App({ target }) (use mount() / hydrate()), bind:this to a non-$state variable (loses reactivity), destructured $state proxy used as the destructured local (loses reactivity), setting $state inside $effect to derive a value (use $derived), $effect that reads and writes the same $state (infinite loop, wrap in untrack), $state for arrays larger than 1000 elements without considering $state.raw, $effect used to initialise state on the server (effects only run in the browser), reading state inside $effect after await (no longer tracked), importing from svelte/legacy (run, createEventDispatcher) in new code, throw error(...) / throw redirect(...) in SvelteKit 2 (just call them), wrapping redirect() in try/catch (swallows the redirect), cookies.set / cookies.delete without explicit path: '/', top-level unawaited promises in load (SvelteKit 2 requires explicit await / Promise.all), goto('https://external') (rejected in SvelteKit 2, use window.location.href), $page from $app/stores in new code (use page from $app/state, 2.12+), resolvePath (renamed resolveRoute in $app/paths), use:enhance callback args form / data renamed formElement / formData, form with file inputs missing enctype='multipart/form-data', paths.relative default flipped to true (declare explicitly if hardcoding), $env/dynamic/* read during prerender (use $env/static/*), writable() / readable() stores for component-local state (use $state), stores in .ts modules for cross-component shared state (use .svelte.ts with $state), lucide-svelte import (use @lucide/svelte the scoped Svelte 5 fork), melt-ui import (use bits-ui for Svelte 5), Felte for forms (effectively abandoned, use sveltekit-superforms + formsnap), <img> for above-the-fold images (use <enhanced:img>), component event payload typed via CustomEvent<T> (use callback-prop function signature), withDefaults-style prop defaults (Svelte 5 supports defaults inline in destructure), manually generating SSR-safe IDs for ARIA (use $props.id()), let { children } = $props() then <slot> (use {@render children?.()}), mutating non-$bindable props in a child, +page.ts exports without satisfies PageLoad, mount(App) without unmount on teardown / new App() for tests."
+globs: "**/*.svelte,**/*.svelte.ts,**/*.svelte.js,**/*.ts,**/*.js,src/routes/**/*,src/hooks.{server,client}.{ts,js}"
+alwaysApply: false
+---
+
+# SvelteKit 2 + Svelte 5 (Runes) Anti-Patterns
+
+Cursor: when generating Svelte or SvelteKit code, refuse to emit any of the patterns below. Each entry has the BAD form, the GOOD replacement, and a one-line explanation. Target: `svelte ^5.55.7`, `@sveltejs/kit ^2.60.1`, `vite ^8.0.13`, `typescript ^6.0.3`, `vitest ^4.1.6`, `@playwright/test ^1.60.0`, `tailwindcss ^4.3.0`, `bits-ui ^2.18.1`, `@lucide/svelte ^1.16.0`, `sveltekit-superforms ^2.30.1`, `formsnap ^2.0.1`, `zod ^4.4.3`. Node 24 LTS.
+
+The companion `svelte-5-runes`, `svelte-5-events-and-snippets`, `sveltekit-2-core`, `sveltekit-routing-and-load`, `sveltekit-forms-and-actions`, `sveltekit-app-state`, `svelte-5-reactivity-traps`, `svelte-5-typescript`, and `sveltekit-testing` rules cover the matching positive patterns.
+
+## Section A: Svelte 5 syntax
+
+### 1. `let count = 0` for component state without `$state(0)`
+
+In runes mode (Svelte 5 default for any project that opts in or any `.svelte.ts` module), bare `let` declarations are NOT reactive. Mutating them does not re-render. Source: https://svelte.dev/docs/svelte/$state
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let count = 0
+  const inc = () => count++  // mutates the local, no re-render
+</script>
+<button onclick={inc}>{count}</button>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let count = $state(0)
+  const inc = () => count++
+</script>
+<button onclick={inc}>{count}</button>
+```
+
+### 2. `$:` reactive statements in runes-mode files
+
+`$:` is the Svelte 4 / non-runes reactive statement. In runes mode it is a syntax error. Source: https://svelte.dev/docs/svelte/$derived
+
+```svelte
+<!-- BAD (runes mode) -->
+<script lang="ts">
+  let count = $state(0)
+  $: doubled = count * 2
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let count = $state(0)
+  let doubled = $derived(count * 2)
+</script>
+```
+
+### 3. `export let prop` in any file using runes
+
+`export let` is the Svelte 4 prop declaration. Runes mode requires `$props()`. Source: https://svelte.dev/docs/svelte/$props
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  export let title: string
+  export let count = 0
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let { title, count = 0 }: { title: string; count?: number } = $props()
+</script>
+```
+
+### 4. `on:click` and any `on:event` directive
+
+Svelte 5 dropped the `on:` namespace. Event handlers are plain DOM attributes, the same as React / vanilla HTML. Source: https://svelte.dev/docs/svelte/svelte-5-migration-guide#Event-changes
+
+```svelte
+<!-- BAD -->
+<button on:click={handle}>Click</button>
+<input on:input={oninput} />
+```
+
+```svelte
+<!-- GOOD -->
+<button onclick={handle}>Click</button>
+<input oninput={oninput} />
+```
+
+### 5. Event modifiers `|preventDefault`, `|stopPropagation`, `|self`, `|once`
+
+Event modifiers were removed with the `on:` namespace. Handle the modifier in the function body. Source: https://svelte.dev/docs/svelte/svelte-5-migration-guide#Event-changes-Event-modifiers
+
+```svelte
+<!-- BAD -->
+<form on:submit|preventDefault={save}>...</form>
+<a on:click|stopPropagation={openDialog}>...</a>
+```
+
+```svelte
+<!-- GOOD -->
+<form onsubmit={(e) => { e.preventDefault(); save(e) }}>...</form>
+<a onclick={(e) => { e.stopPropagation(); openDialog() }}>...</a>
+```
+
+### 6. `createEventDispatcher` + `dispatch('foo', payload)`
+
+`createEventDispatcher` is gone. Components communicate via callback props. Source: https://svelte.dev/docs/svelte/svelte-5-migration-guide#Event-changes-Component-events
+
+```svelte
+<!-- BAD - child -->
+<script lang="ts">
+  import { createEventDispatcher } from 'svelte'
+  const dispatch = createEventDispatcher<{ select: { id: string } }>()
+  const choose = (id: string) => dispatch('select', { id })
+</script>
+```
+
+```svelte
+<!-- GOOD - child -->
+<script lang="ts">
+  let { onselect }: { onselect: (id: string) => void } = $props()
+  const choose = (id: string) => onselect(id)
+</script>
+```
+
+```svelte
+<!-- GOOD - parent -->
+<Picker onselect={(id) => console.log(id)} />
+```
+
+### 7. `<slot />` and `<slot name="x" />`
+
+Slots were replaced by snippets in Svelte 5. The default slot is `children`; named slots are individual snippet props. Source: https://svelte.dev/docs/svelte/snippet
+
+```svelte
+<!-- BAD - child -->
+<div class="card">
+  <slot name="header" />
+  <slot />
+</div>
+```
+
+```svelte
+<!-- GOOD - child -->
+<script lang="ts">
+  import type { Snippet } from 'svelte'
+  let { header, children }: { header?: Snippet; children?: Snippet } = $props()
+</script>
+<div class="card">
+  {@render header?.()}
+  {@render children?.()}
+</div>
+```
+
+```svelte
+<!-- GOOD - parent -->
+<Card>
+  {#snippet header()}<h2>Title</h2>{/snippet}
+  <p>Body content.</p>
+</Card>
+```
+
+### 8. Component instantiation via `new App({ target })`
+
+Svelte 5 dropped the class instance API. Use `mount()` for client roots, `hydrate()` for SSR'd roots. Source: https://svelte.dev/docs/svelte/svelte-5-migration-guide#Components-are-no-longer-classes
+
+```ts
+// BAD - main.ts
+import App from './App.svelte'
+const app = new App({ target: document.getElementById('app')! })
+export default app
+```
+
+```ts
+// GOOD - main.ts
+import { mount } from 'svelte'
+import App from './App.svelte'
+const app = mount(App, { target: document.getElementById('app')! })
+export default app
+```
+
+### 9. `bind:this={el}` to a non-`$state` variable
+
+`bind:this` writes to its target. In runes mode the target must be a `$state` ref so the assignment triggers reactivity. A bare `let el` will receive the node but no consumer of `el` will re-run. Source: https://svelte.dev/docs/svelte/bind#bind-this
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let el: HTMLDivElement  // bare let; reads of el do not re-run
+  $effect(() => { console.log(el?.offsetWidth) })  // never sees the assignment
+</script>
+<div bind:this={el}>...</div>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let el = $state<HTMLDivElement | undefined>()
+  $effect(() => { if (el) console.log(el.offsetWidth) })
+</script>
+<div bind:this={el}>...</div>
+```
+
+### 10. Destructuring a `$state` proxy and using the destructured local
+
+`$state` returns a proxy. Destructuring captures the value at that moment; the local is no longer reactive. Read through the proxy. Source: https://svelte.dev/docs/svelte/$state#Deep-state
+
+```ts
+// BAD
+const cart = $state({ items: [], total: 0 })
+const { items } = cart  // local snapshot
+function add(i: Item) { items.push(i) }  // mutates the snapshot, but consumers reading cart.items also see it because it's the same array - until cart is reassigned
+```
+
+```ts
+// GOOD
+const cart = $state({ items: [] as Item[], total: 0 })
+function add(i: Item) { cart.items.push(i) }  // read through the proxy
+```
+
+## Section B: Reactivity
+
+### 11. Setting `$state` inside `$effect` to derive a value
+
+If the new value is a pure function of other state, it is a `$derived`, not a side effect. `$effect` for derivation is the most common Svelte 5 LLM regression. Source: https://svelte.dev/docs/svelte/$effect#When-not-to-use-effects
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let count = $state(0)
+  let doubled = $state(0)
+  $effect(() => { doubled = count * 2 })
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let count = $state(0)
+  let doubled = $derived(count * 2)
+</script>
+```
+
+### 12. `$effect` reading and writing the same `$state` (infinite loop)
+
+`$effect` re-runs whenever any read state changes. Writing to a state it reads creates an infinite loop. If you genuinely need a write that does not retrigger, wrap reads in `untrack`. Source: https://svelte.dev/docs/svelte/$effect#untrack
+
+```svelte
+<!-- BAD - infinite loop -->
+<script lang="ts">
+  let value = $state(0)
+  $effect(() => { value = value + 1 })  // reads value, writes value, repeats
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  import { untrack } from 'svelte'
+  let value = $state(0)
+  let trigger = $state(0)
+  $effect(() => {
+    trigger  // tracked
+    value = untrack(() => value) + 1
+  })
+</script>
+```
+
+### 13. `$state` for arrays larger than 1000 elements without considering `$state.raw`
+
+`$state` wraps every nested object / array in a Proxy. For large data sets the proxy overhead dominates render time. `$state.raw` opts out of deep proxying; mutate by replacement. Source: https://svelte.dev/docs/svelte/$state#$state.raw
+
+```ts
+// BAD - 50,000 row table
+let rows = $state<Row[]>(loadFiftyThousandRows())  // each row proxied
+```
+
+```ts
+// GOOD
+let rows = $state.raw<Row[]>(loadFiftyThousandRows())
+function addRow(r: Row) { rows = [...rows, r] }  // replace, do not push
+```
+
+### 14. `$effect` used to initialise state on the server
+
+Effects only run in the browser. Initialisation in `$effect` produces undefined SSR output and a hydration mismatch. Source: https://svelte.dev/docs/svelte/$effect#Effects-only-run-in-the-browser
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let now = $state<string>('')
+  $effect(() => { now = new Date().toISOString() })  // empty string in SSR HTML
+</script>
+<p>{now}</p>
+```
+
+```svelte
+<!-- GOOD - if you really need it on both, derive from a load value -->
+<script lang="ts">
+  let { now }: { now: string } = $props()  // passed from +page.ts load
+</script>
+<p>{now}</p>
+```
+
+### 15. Reading state inside `$effect` after `await` (no longer tracked)
+
+`$effect` only tracks state read synchronously before the first `await`. Reads after the await are not tracked, so the effect will not re-run when they change. Source: https://svelte.dev/docs/svelte/$effect#Understanding-dependencies
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let id = $state('a')
+  let other = $state('x')
+  $effect(async () => {
+    await fetch(`/api/${id}`)  // tracks id
+    console.log(other)         // does NOT track other
+  })
+</script>
+```
+
+```svelte
+<!-- GOOD - read everything you need to track up front -->
+<script lang="ts">
+  let id = $state('a')
+  let other = $state('x')
+  $effect(() => {
+    const i = id
+    const o = other  // tracked synchronously
+    void (async () => {
+      await fetch(`/api/${i}`)
+      console.log(o)
+    })()
+  })
+</script>
+```
+
+### 16. Importing from `svelte/legacy` in new code
+
+`svelte/legacy` (`run`, `createEventDispatcher`, `createBubbler`, `nonpassive`) exists for migration tooling output. New code should reach for runes / callback props instead. Source: https://svelte.dev/docs/svelte/legacy-overview
+
+```ts
+// BAD - new code
+import { run, createEventDispatcher } from 'svelte/legacy'
+```
+
+```ts
+// GOOD - use $effect / callback props
+// (no import needed; runes are language-level)
+```
+
+## Section C: SvelteKit 2 routing
+
+### 17. `throw error(...)` / `throw redirect(...)` in SvelteKit 2
+
+SvelteKit 2 changed `error()` and `redirect()` to throw internally. You no longer prepend `throw`. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#redirect-and-error-are-no-longer-thrown-by-you
+
+```ts
+// BAD
+import { error, redirect } from '@sveltejs/kit'
+export const load = async ({ params }) => {
+  if (!params.id) throw error(400, 'Missing id')
+  if (!user) throw redirect(303, '/login')
+}
+```
+
+```ts
+// GOOD
+import { error, redirect } from '@sveltejs/kit'
+export const load = async ({ params }) => {
+  if (!params.id) error(400, 'Missing id')
+  if (!user) redirect(303, '/login')
+}
+```
+
+### 18. Wrapping `redirect()` in try/catch (swallows the redirect)
+
+Because `redirect()` throws internally, a catch-all `try { ... } catch { ... }` will swallow it. Re-throw or use `isHttpError` / `isRedirect` to filter. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#redirect-and-error-are-no-longer-thrown-by-you
+
+```ts
+// BAD
+import { redirect, isRedirect } from '@sveltejs/kit'
+export const load = async () => {
+  try {
+    if (!user) redirect(303, '/login')  // throws Redirect
+    return { user }
+  } catch (e) {
+    return { user: null }  // swallows the redirect
+  }
+}
+```
+
+```ts
+// GOOD
+import { redirect, isRedirect } from '@sveltejs/kit'
+export const load = async () => {
+  try {
+    if (!user) redirect(303, '/login')
+    return { user }
+  } catch (e) {
+    if (isRedirect(e)) throw e  // re-throw redirects
+    return { user: null }
+  }
+}
+```
+
+### 19. `cookies.set` / `cookies.delete` without explicit `path: '/'`
+
+SvelteKit 2 made `path` mandatory on cookie operations. There is no longer a default. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#path-is-required-when-setting-cookies
+
+```ts
+// BAD
+cookies.set('session', token, { httpOnly: true })  // throws in SvelteKit 2
+cookies.delete('session')
+```
+
+```ts
+// GOOD
+cookies.set('session', token, { path: '/', httpOnly: true })
+cookies.delete('session', { path: '/' })
+```
+
+### 20. Top-level unawaited promises in `load`
+
+SvelteKit 1 auto-awaited top-level promises returned from `load`. SvelteKit 2 requires explicit `await` (or `Promise.all`) for type safety and clarity. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#top-level-promises-are-no-longer-awaited
+
+```ts
+// BAD - SvelteKit 2
+export const load = async ({ fetch }) => {
+  return {
+    posts: fetch('/api/posts').then(r => r.json()),  // not auto-awaited; type is Promise<unknown>
+    tags: fetch('/api/tags').then(r => r.json()),
+  }
+}
+```
+
+```ts
+// GOOD - explicit Promise.all for parallel fetches
+export const load = async ({ fetch }) => {
+  const [posts, tags] = await Promise.all([
+    fetch('/api/posts').then(r => r.json()),
+    fetch('/api/tags').then(r => r.json()),
+  ])
+  return { posts, tags }
+}
+```
+
+### 21. `goto('https://external')`
+
+SvelteKit 2 rejects external URLs in `goto()`. Use `window.location.href` for full-page navigations to other origins. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#goto-no-longer-accepts-external-urls
+
+```ts
+// BAD
+import { goto } from '$app/navigation'
+goto('https://example.com')  // throws in SvelteKit 2
+```
+
+```ts
+// GOOD
+window.location.href = 'https://example.com'
+```
+
+### 22. `$page` from `$app/stores` in new code
+
+`$app/stores` was deprecated in `@sveltejs/kit` 2.12 in favour of `$app/state`, which exposes plain reactive objects (no `$` prefix, no store subscription). Source: https://svelte.dev/docs/kit/$app-state
+
+```svelte
+<!-- BAD - new code on Kit 2.12+ -->
+<script lang="ts">
+  import { page } from '$app/stores'
+</script>
+<p>{$page.url.pathname}</p>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  import { page } from '$app/state'
+</script>
+<p>{page.url.pathname}</p>
+```
+
+### 23. `resolvePath` (renamed `resolveRoute`)
+
+`resolvePath` was renamed `resolveRoute` in `$app/paths`. The old name is removed in SvelteKit 2. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#resolvePath-is-replaced-by-resolveRoute
+
+```ts
+// BAD
+import { resolvePath } from '$app/paths'
+const href = resolvePath('/posts/[slug]', { slug: 'hello' })
+```
+
+```ts
+// GOOD
+import { resolveRoute } from '$app/paths'
+const href = resolveRoute('/posts/[slug]', { slug: 'hello' })
+```
+
+## Section D: SvelteKit 2 forms
+
+### 24. `use:enhance` callback args `form` / `data` (renamed `formElement` / `formData`)
+
+In SvelteKit 2 the `enhance` callback gives you `formElement` and `formData` instead of the ambiguous `form` and `data`. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#use-enhance-callback-changes
+
+```svelte
+<!-- BAD -->
+<form
+  method="POST"
+  use:enhance={({ form, data, action, cancel }) => {
+    return async ({ result }) => {}
+  }}
+>
+```
+
+```svelte
+<!-- GOOD -->
+<form
+  method="POST"
+  use:enhance={({ formElement, formData, action, cancel }) => {
+    return async ({ result }) => {}
+  }}
+>
+```
+
+### 25. Form with file inputs missing `enctype="multipart/form-data"`
+
+SvelteKit 2 throws under `use:enhance` if a form contains `<input type="file">` and the `<form>` does not have `enctype="multipart/form-data"`. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#forms-with-file-inputs-must-use-multipart-form-data
+
+```svelte
+<!-- BAD -->
+<form method="POST" use:enhance>
+  <input type="file" name="avatar" />
+  <button>Upload</button>
+</form>
+```
+
+```svelte
+<!-- GOOD -->
+<form method="POST" enctype="multipart/form-data" use:enhance>
+  <input type="file" name="avatar" />
+  <button>Upload</button>
+</form>
+```
+
+### 26. `paths.relative: undefined` (default flipped to `true`)
+
+SvelteKit 2 flipped the default of `kit.paths.relative` from `false` to `true`. If your code hardcodes `paths.relative` knowledge, declare the value explicitly to avoid surprises. Source: https://svelte.dev/docs/kit/migrating-to-sveltekit-2#paths-relative-default-changed
+
+```ts
+// BAD - assumes the v1 default
+// svelte.config.js (paths key omitted)
+```
+
+```ts
+// GOOD
+// svelte.config.js
+const config = {
+  kit: {
+    paths: { relative: true },  // declared, matches the v2 default
+  },
+}
+export default config
+```
+
+### 27. `$env/dynamic/*` read during prerender
+
+Prerender runs at build time; dynamic env vars (read at runtime) are not available. Use `$env/static/*` for build-time-known constants. Source: https://svelte.dev/docs/kit/$env-dynamic-private
+
+```ts
+// BAD - +page.server.ts with prerender = true
+import { env } from '$env/dynamic/private'
+export const prerender = true
+export const load = async () => {
+  return { apiKey: env.API_KEY }  // undefined at prerender
+}
+```
+
+```ts
+// GOOD
+import { API_KEY } from '$env/static/private'
+export const prerender = true
+export const load = async () => {
+  return { apiKey: API_KEY }
+}
+```
+
+## Section E: state modules and stores
+
+### 28. `writable()` / `readable()` stores for component-local state
+
+Stores were the Svelte 4 reactivity mechanism for component-local state. Svelte 5 uses `$state`. Stores still work but are no longer the documented shape for new component code. Source: https://svelte.dev/docs/svelte/stores
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  import { writable } from 'svelte/store'
+  const count = writable(0)
+</script>
+<button onclick={() => count.update(n => n + 1)}>{$count}</button>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let count = $state(0)
+</script>
+<button onclick={() => count++}>{count}</button>
+```
+
+### 29. Stores in `.ts` modules for cross-component shared state
+
+For shared state across components, use a `.svelte.ts` module that exports `$state`. The `.svelte.ts` extension tells the compiler to treat the module as runes-aware. Source: https://svelte.dev/docs/svelte/$state#Universal-reactivity
+
+```ts
+// BAD - src/lib/cart.ts
+import { writable } from 'svelte/store'
+export const cart = writable<{ items: Item[] }>({ items: [] })
+```
+
+```ts
+// GOOD - src/lib/state/cart.svelte.ts
+class Cart {
+  items = $state<Item[]>([])
+  get total() { return this.items.reduce((s, i) => s + i.price, 0) }
+  add(i: Item) { this.items.push(i) }
+}
+export const cart = new Cart()
+```
+
+### 30. `lucide-svelte` import (use `@lucide/svelte`)
+
+`lucide-svelte` was the Svelte 4 package; `@lucide/svelte` is the scoped Svelte 5 fork that ships native runes support. Source: https://lucide.dev/guide/packages/lucide-svelte
+
+```ts
+// BAD
+import { Camera } from 'lucide-svelte'
+```
+
+```ts
+// GOOD
+import Camera from '@lucide/svelte/icons/camera'
+```
+
+### 31. `melt-ui` import (use `bits-ui` for Svelte 5)
+
+`@melt-ui/svelte` was the headless library for Svelte 4. For Svelte 5 the documented headless layer is `bits-ui` (the layer underneath `shadcn-svelte`). `@melt-ui/svelte` is in maintenance only. Source: https://www.bits-ui.com
+
+```ts
+// BAD - new Svelte 5 code
+import { createDialog } from '@melt-ui/svelte'
+```
+
+```ts
+// GOOD
+import { Dialog } from 'bits-ui'
+```
+
+### 32. Felte for forms
+
+Felte (`felte`, `@felte/validator-zod`) is effectively abandoned for SvelteKit. The documented forms stack is `sveltekit-superforms` + `formsnap` + `zod`. Source: https://superforms.rocks
+
+```ts
+// BAD
+import { createForm } from 'felte'
+import { validator } from '@felte/validator-zod'
+```
+
+```ts
+// GOOD - +page.server.ts
+import { superValidate } from 'sveltekit-superforms'
+import { zod } from 'sveltekit-superforms/adapters'
+import { schema } from './schema'
+export const load = async () => ({ form: await superValidate(zod(schema)) })
+```
+
+### 33. `<img>` for above-the-fold images
+
+`@sveltejs/enhanced-img` rewrites `<enhanced:img>` at build time to a `<picture>` with AVIF / WebP sources, intrinsic dimensions, and srcset. Plain `<img>` ships the original asset and triggers CLS. Source: https://svelte.dev/docs/kit/images
+
+```svelte
+<!-- BAD -->
+<img src="/hero.jpg" alt="Hero" />
+```
+
+```svelte
+<!-- GOOD -->
+<enhanced:img src="./hero.jpg?enhanced" alt="Hero" />
+```
+
+## Section F: Svelte 5 typing
+
+### 34. Component event payload typed via `CustomEvent<T>`
+
+`CustomEvent<T>` was the Svelte 4 typing for `createEventDispatcher` payloads. With callback props the payload is the function signature, no `CustomEvent` wrapper. Source: https://svelte.dev/docs/svelte/svelte-5-migration-guide#Event-changes
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  function onSelect(e: CustomEvent<{ id: string }>) { console.log(e.detail.id) }
+</script>
+<Picker on:select={onSelect} />
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  function onSelect(id: string) { console.log(id) }
+</script>
+<Picker onselect={onSelect} />
+```
+
+### 35. `withDefaults`-style prop defaults
+
+There is no `withDefaults` in Svelte 5. Defaults work as native JavaScript destructure defaults inside `$props()`. Source: https://svelte.dev/docs/svelte/$props
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  type Props = { size?: 'sm' | 'md' | 'lg' }
+  const { size }: Props = withDefaults($props<Props>(), { size: 'md' })
+</script>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  let { size = 'md' }: { size?: 'sm' | 'md' | 'lg' } = $props()
+</script>
+```
+
+### 36. Manually generating SSR-safe IDs for ARIA
+
+Svelte 5.20 added `$props.id()` for stable, SSR-safe component instance IDs. Use it for `aria-labelledby`, `aria-describedby`, `for`. Source: https://svelte.dev/docs/svelte/$props#$props.id
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  const uid = `field-${Math.random().toString(36).slice(2)}`  // SSR + client mismatch
+</script>
+<label for={uid}>Email</label>
+<input id={uid} type="email" />
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  const uid = $props.id()
+</script>
+<label for="{uid}-email">Email</label>
+<input id="{uid}-email" type="email" />
+```
+
+### 37. `let { children } = $props()` then `<slot>`
+
+If you destructure `children` from `$props()`, render with `{@render children?.()}`, NOT `<slot>`. The two systems do not co-exist. Source: https://svelte.dev/docs/svelte/snippet#Default-content
+
+```svelte
+<!-- BAD -->
+<script lang="ts">
+  let { children } = $props()
+</script>
+<div><slot /></div>
+```
+
+```svelte
+<!-- GOOD -->
+<script lang="ts">
+  import type { Snippet } from 'svelte'
+  let { children }: { children?: Snippet } = $props()
+</script>
+<div>{@render children?.()}</div>
+```
+
+### 38. Mutating non-`$bindable` props in a child
+
+Props are read-only in the child by default. Mutating them throws in dev. To allow two-way binding, mark the prop `$bindable()`. Source: https://svelte.dev/docs/svelte/$bindable
+
+```svelte
+<!-- BAD - child -->
+<script lang="ts">
+  let { value } = $props()
+  function reset() { value = '' }  // throws in dev
+</script>
+```
+
+```svelte
+<!-- GOOD - child -->
+<script lang="ts">
+  let { value = $bindable('') }: { value?: string } = $props()
+  function reset() { value = '' }
+</script>
+```
+
+```svelte
+<!-- GOOD - parent -->
+<TextInput bind:value={text} />
+```
+
+## Section G: testing and types
+
+### 39. `+page.ts` exports without `satisfies PageLoad`
+
+Type the `load` export with `satisfies PageLoad` so Svelte's generated `$types` propagates the return shape into `+page.svelte`. Source: https://svelte.dev/docs/kit/load#Type-safety
+
+```ts
+// BAD - src/routes/posts/[slug]/+page.ts
+export const load = async ({ params }) => {
+  return { slug: params.slug }
+}
+```
+
+```ts
+// GOOD
+import type { PageLoad } from './$types'
+export const load: PageLoad = async ({ params }) => {
+  return { slug: params.slug }
+}
+// or:
+// export const load = (async ({ params }) => ({ slug: params.slug })) satisfies PageLoad
+```
+
+### 40. `mount(App)` without unmount on teardown / `new App()` for tests
+
+Use `@testing-library/svelte`'s `render()` for component tests. Manual `mount()` requires manual `unmount()` and bypasses `cleanup()`. `new App({ target })` is the dropped Svelte 4 instance API. Source: https://testing-library.com/docs/svelte-testing-library/intro
+
+```ts
+// BAD - Counter.test.ts
+import { mount } from 'svelte'
+import Counter from './Counter.svelte'
+test('renders', () => {
+  const target = document.createElement('div')
+  mount(Counter, { target })
+  expect(target.textContent).toContain('0')
+  // no unmount; handlers leak across tests
+})
+```
+
+```ts
+// GOOD
+import { render, screen } from '@testing-library/svelte'
+import { test, expect } from 'vitest'
+import Counter from './Counter.svelte'
+test('renders', () => {
+  render(Counter)
+  expect(screen.getByRole('button')).toHaveTextContent('0')
+})
+```

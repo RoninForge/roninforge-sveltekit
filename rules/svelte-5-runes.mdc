@@ -1,0 +1,231 @@
+---
+description: "Svelte 5 Runes that LLMs trained pre-October 2024 do not know: $state for reactive locals (proxy-wrapped, mutate in place), $state.raw for large arrays / immutable replacement, $state.snapshot for serialisation, $derived for pure derivations, $derived.by for multi-line derivations, $effect for browser-only side effects, $effect.pre for pre-DOM-update timing, $effect.tracking for tracking introspection, $effect.root for manual effect roots, $props for typed component inputs, $props.id for SSR-safe instance IDs (5.20+), $bindable for opt-in two-way binding, $host for custom-element host element, $inspect for debug logging. Companion to sveltekit-anti-patterns rule entries #1, #2, #3, #11, #12, #13, #14, #15."
+globs: "**/*.svelte,**/*.svelte.ts,**/*.svelte.js"
+alwaysApply: false
+---
+
+# Svelte 5 Runes
+
+Cursor: Svelte 5 (October 2024) introduced runes, a compile-time language extension that replaces the implicit `let` reactivity, `$:` reactive statements, `export let` props, and stores-for-everything pattern of Svelte 4. Target: `svelte ^5.55.7`.
+
+The companion `sveltekit-anti-patterns` rule rejects the pre-runes shapes (entries #1, #2, #3, #11, #12, #13, #14, #15). This rule explains the positive form.
+
+## `$state` for reactive locals
+
+`$state` returns a reactive proxy. Mutate in place; consumers re-read.
+
+```svelte
+<script lang="ts">
+  let count = $state(0)
+  let user = $state({ name: 'Ada', age: 36 })
+  let items = $state<string[]>([])
+
+  function inc() { count++ }
+  function rename() { user.name = 'Grace' }
+  function add(s: string) { items.push(s) }
+</script>
+```
+
+Deep state: nested objects and arrays are recursively proxied. Reading a nested field is tracked; writing is reactive. Reads through a destructured local are NOT tracked once the local is captured.
+
+## `$state.raw` for large or immutable data
+
+Opts out of deep proxying. Mutate by replacement, never in place.
+
+```ts
+let rows = $state.raw<Row[]>([])
+function add(r: Row) { rows = [...rows, r] }    // GOOD: replace
+// rows.push(r)                                  // BAD: mutation is invisible
+```
+
+Use when:
+
+- Arrays larger than a few hundred elements where proxy overhead matters.
+- Class instances you do not want auto-proxied.
+- Data you serialise to JSON; the proxy adds enumerable property weight.
+
+## `$state.snapshot` for serialisation
+
+Returns a plain (non-proxy) deep clone of a reactive value. Use before sending state to an API, `JSON.stringify`, or `structuredClone`.
+
+```ts
+const cart = $state({ items: [] as Item[] })
+const payload = $state.snapshot(cart)  // plain object
+await fetch('/api/cart', { method: 'POST', body: JSON.stringify(payload) })
+```
+
+## `$derived` for pure derivations
+
+Recomputes lazily when any read state changes. Do NOT use `$effect` to write a derived value (anti-pattern #11).
+
+```svelte
+<script lang="ts">
+  let count = $state(0)
+  let doubled = $derived(count * 2)
+  let label = $derived(`${count} clicks`)
+</script>
+```
+
+For multi-line derivations, use `$derived.by(() => { ... })`:
+
+```ts
+let sorted = $derived.by(() => {
+  const copy = [...items]
+  copy.sort((a, b) => a.priority - b.priority)
+  return copy
+})
+```
+
+## `$effect` for browser-only side effects
+
+Runs after the DOM updates. Tracks every `$state` read synchronously before the first `await`. Returns a cleanup callback. Source: https://svelte.dev/docs/svelte/$effect
+
+```svelte
+<script lang="ts">
+  let id = $state(1)
+
+  $effect(() => {
+    const ctrl = new AbortController()
+    fetch(`/api/${id}`, { signal: ctrl.signal }).then(/* ... */)
+    return () => ctrl.abort()
+  })
+</script>
+```
+
+Effects only run in the browser. They never run during SSR. If you need a value in the SSR HTML, compute it in `+page.ts` / `+page.server.ts` `load` and pass it as a prop.
+
+`$effect.pre` runs BEFORE DOM update; useful for measurement before commit.
+
+`$effect.tracking()` returns whether the calling code is inside a tracking context.
+
+`$effect.root()` creates a manual root for effects outside a component lifecycle (rare; for libraries).
+
+## `$props` for typed component inputs
+
+Replaces `export let`. Defaults via destructure. Type via inline annotation.
+
+```svelte
+<script lang="ts">
+  import type { Snippet } from 'svelte'
+
+  type Props = {
+    title: string
+    count?: number
+    children?: Snippet
+    onsave?: (value: string) => void
+  }
+
+  let { title, count = 0, children, onsave }: Props = $props()
+</script>
+```
+
+`...rest` props:
+
+```svelte
+<script lang="ts">
+  let { title, ...rest }: { title: string; [k: string]: unknown } = $props()
+</script>
+<button {...rest}>{title}</button>
+```
+
+## `$props.id()` for SSR-safe instance IDs (Svelte 5.20+)
+
+Returns a unique, stable, SSR-safe ID for the current component instance. Use for `aria-labelledby`, `aria-describedby`, `for`. Source: https://svelte.dev/docs/svelte/$props#$props.id
+
+```svelte
+<script lang="ts">
+  const uid = $props.id()
+</script>
+<label for="{uid}-email">Email</label>
+<input id="{uid}-email" type="email" />
+```
+
+## `$bindable` for opt-in two-way binding
+
+Props are read-only by default. `$bindable()` marks a prop as writable so the parent can `bind:` to it.
+
+```svelte
+<!-- child: TextInput.svelte -->
+<script lang="ts">
+  let { value = $bindable('') }: { value?: string } = $props()
+</script>
+<input bind:value />
+```
+
+```svelte
+<!-- parent -->
+<script lang="ts">
+  let text = $state('')
+</script>
+<TextInput bind:value={text} />
+```
+
+## `$host` for custom-element host element (rare)
+
+When a component is compiled as a custom element, `$host()` returns the host `HTMLElement`. Use only inside `<svelte:options customElement="..." />` components.
+
+```svelte
+<svelte:options customElement="my-counter" />
+<script lang="ts">
+  let count = $state(0)
+  function emit() {
+    $host().dispatchEvent(new CustomEvent('inc', { detail: count }))
+  }
+</script>
+```
+
+## `$inspect` for debug logging
+
+Logs the value (and any change) to the console in dev. No-op in production.
+
+```ts
+let count = $state(0)
+$inspect(count)  // logs every change
+
+// Add a label via the custom-logger callback (the second arg is not a label):
+$inspect(cart).with((type, val) => console.warn('cart', type, val))
+```
+
+## Why these matter for LLM output
+
+Pre-October-2024 trained models will produce:
+
+- `let count = 0` for component state (anti-pattern #1)
+- `$: doubled = count * 2` (anti-pattern #2)
+- `export let title: string` (anti-pattern #3)
+- `$effect(() => { doubled = count * 2 })` instead of `$derived` (anti-pattern #11)
+- `$state` for huge arrays without `$state.raw` (anti-pattern #13)
+- `$effect` reads after `await` expecting tracking (anti-pattern #15)
+
+Each is the documented Svelte 4 shape. Each is wrong in Svelte 5 runes mode. The rune form is the documented shape on `svelte.dev` since the 5.0 release.
+
+## Quick-reference combination
+
+A small Svelte 5 component using the rune trio together:
+
+```svelte
+<script lang="ts">
+  import type { Snippet } from 'svelte'
+
+  type Props = {
+    initial?: number
+    children?: Snippet<[count: number]>
+    onchange?: (n: number) => void
+  }
+
+  let { initial = 0, children, onchange }: Props = $props()
+
+  let count = $state(initial)
+  let doubled = $derived(count * 2)
+  const uid = $props.id()
+
+  $effect(() => { onchange?.(count) })
+</script>
+
+<div>
+  <label for="{uid}-c">Count</label>
+  <input id="{uid}-c" type="number" bind:value={count} />
+  <p>Doubled: {doubled}</p>
+  {@render children?.(count)}
+</div>
+```

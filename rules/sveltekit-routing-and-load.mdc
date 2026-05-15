@@ -1,0 +1,196 @@
+---
+description: "SvelteKit 2 routing and load functions: file-based routing under src/routes/ with +page.svelte / +layout.svelte / +error.svelte / +server.ts files, +page.ts (universal load runs on server AND client) vs +page.server.ts (server-only load with access to cookies / locals / private env), satisfies PageLoad / PageServerLoad / LayoutLoad for type inference into +page.svelte, +server.ts for non-page HTTP endpoints (GET, POST, PUT, PATCH, DELETE, OPTIONS exports), depends() for manual invalidation keys, parent() to read parent layout data, fetch() that proxies cookies + reuses SSR responses, route groups via (group) parens, route params via [param] / [...rest] / [[optional]] / [param=matcher]. Companion to sveltekit-anti-patterns rule entries #17, #18, #20, #21, #39."
+globs: "src/routes/**/*.{ts,js,svelte}"
+alwaysApply: false
+---
+
+# SvelteKit 2 Routing and Load
+
+Cursor: SvelteKit 2 routes are file-based under `src/routes/`. Each segment is a directory; the role is encoded in the filename prefix `+`. Target: `@sveltejs/kit ^2.60.1`.
+
+The companion `sveltekit-anti-patterns` rule rejects the SvelteKit 1 shapes (entries #17, #18, #20, #21, #39).
+
+## File roles
+
+| File                | Role                                                                |
+| ------------------- | ------------------------------------------------------------------- |
+| `+page.svelte`      | The page component                                                  |
+| `+page.ts`          | Universal load (runs on server then client)                         |
+| `+page.server.ts`   | Server-only load + form actions (cookies, private env, db access)   |
+| `+layout.svelte`    | Layout wrapper that renders `{@render children?.()}`                |
+| `+layout.ts`        | Universal layout load                                               |
+| `+layout.server.ts` | Server-only layout load                                             |
+| `+error.svelte`     | Error boundary                                                      |
+| `+server.ts`        | Non-page HTTP endpoint (REST handler)                               |
+
+## `+page.ts` (universal load)
+
+Runs on the server during SSR, then on the client during client-side navigation. Cannot use `cookies`, `locals`, or `$env/static/private`.
+
+```ts
+// src/routes/posts/[slug]/+page.ts
+import { error } from '@sveltejs/kit'
+import type { PageLoad } from './$types'
+
+export const load: PageLoad = async ({ params, fetch }) => {
+  const res = await fetch(`/api/posts/${params.slug}`)
+  if (!res.ok) error(res.status, 'Failed to load post')
+  return { post: await res.json() as Post }
+}
+```
+
+The `satisfies PageLoad` form is also valid:
+
+```ts
+export const load = (async ({ params, fetch }) => {
+  // ...
+}) satisfies PageLoad
+```
+
+## `+page.server.ts` (server-only load + actions)
+
+```ts
+// src/routes/dashboard/+page.server.ts
+import { redirect } from '@sveltejs/kit'
+import type { PageServerLoad, Actions } from './$types'
+
+export const load: PageServerLoad = async ({ locals, cookies }) => {
+  if (!locals.user) redirect(303, '/login')
+  return { user: locals.user }
+}
+
+export const actions: Actions = {
+  logout: async ({ cookies }) => {
+    cookies.delete('session', { path: '/' })
+    redirect(303, '/login')
+  },
+}
+```
+
+## `+page.svelte` consumes `data`
+
+```svelte
+<script lang="ts">
+  import type { PageData } from './$types'
+  let { data }: { data: PageData } = $props()
+</script>
+<h1>{data.post.title}</h1>
+```
+
+`PageData` is generated; it merges all parent layout `load` returns plus this page's `load` return.
+
+## `+layout.svelte` and snippets
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts">
+  import type { Snippet } from 'svelte'
+  let { children }: { children?: Snippet } = $props()
+</script>
+
+<header>...</header>
+<main>{@render children?.()}</main>
+<footer>...</footer>
+```
+
+## `+server.ts` for non-page endpoints
+
+Export one function per HTTP method. Source: https://svelte.dev/docs/kit/routing#server
+
+```ts
+// src/routes/api/posts/+server.ts
+import { json, error } from '@sveltejs/kit'
+import type { RequestHandler } from './$types'
+
+export const GET: RequestHandler = async ({ url, locals }) => {
+  const page = Number(url.searchParams.get('page') ?? 1)
+  const posts = await locals.db.posts.list({ page })
+  return json({ posts })
+}
+
+export const POST: RequestHandler = async ({ request, locals }) => {
+  if (!locals.user) error(401, 'Unauthorized')
+  const body = await request.json()
+  const post = await locals.db.posts.create(body)
+  return json({ post }, { status: 201 })
+}
+```
+
+## `depends()` for manual invalidation keys
+
+```ts
+import type { PageLoad } from './$types'
+import { invalidate } from '$app/navigation'
+
+export const load: PageLoad = async ({ depends, fetch }) => {
+  depends('app:posts')
+  return { posts: await fetch('/api/posts').then(r => r.json()) }
+}
+
+// Elsewhere, after a mutation:
+await invalidate('app:posts')
+```
+
+## `parent()` for reading parent layout data inside child load
+
+```ts
+export const load: PageLoad = async ({ parent }) => {
+  const { user } = await parent()
+  return { user }
+}
+```
+
+Avoid awaiting `parent()` if you do not need it; it serialises the load tree.
+
+## `fetch()` that proxies cookies + reuses SSR responses
+
+The `fetch` provided to `load` knows about same-origin endpoints, forwards cookies during SSR, and avoids a second network round-trip on the client by reusing the SSR response payload.
+
+```ts
+export const load: PageLoad = async ({ fetch }) => {
+  // Same-origin: hits the SvelteKit handler in-process during SSR.
+  const r = await fetch('/api/posts')
+  return { posts: await r.json() }
+}
+```
+
+## Route param patterns
+
+| Pattern                    | URL examples                          | `params` shape                   |
+| -------------------------- | ------------------------------------- | -------------------------------- |
+| `[slug]`                   | `/posts/hello`                        | `{ slug: 'hello' }`              |
+| `[...rest]`                | `/files/a/b/c.txt`                    | `{ rest: 'a/b/c.txt' }`          |
+| `[[optional]]`             | `/about` and `/about/team`            | `{ optional: undefined \| 'team' }` |
+| `[id=integer]` (matcher)   | `/posts/42` only when `42` matches    | `{ id: '42' }` (always string)   |
+
+Matcher example (`src/params/integer.ts`):
+
+```ts
+import type { ParamMatcher } from '@sveltejs/kit'
+export const match: ParamMatcher = (param) => /^\d+$/.test(param)
+```
+
+## Route groups via `(group)` parens
+
+Directories wrapped in parens are group folders that share a layout but do not appear in the URL.
+
+```
+src/routes/
+  (marketing)/
+    +layout.svelte
+    +page.svelte         # /
+    pricing/+page.svelte # /pricing
+  (app)/
+    +layout.server.ts    # auth gate
+    +layout.svelte
+    dashboard/+page.svelte  # /dashboard
+```
+
+## Why these matter for LLM output
+
+Pre-2024 trained models will produce:
+
+- `throw error(...)` / `throw redirect(...)` (anti-pattern #17)
+- Top-level unawaited promises in `load` (anti-pattern #20)
+- `goto('https://external')` (anti-pattern #21)
+- `+page.ts` exports without `PageLoad` type (anti-pattern #39)

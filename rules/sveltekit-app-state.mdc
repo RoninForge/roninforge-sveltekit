@@ -1,0 +1,104 @@
+---
+description: "$app/state replaces $app/stores in @sveltejs/kit 2.12+. Plain reactive objects (page, navigating, updated) instead of stores; no $ prefix, no subscription, fine-grained reactivity through Svelte 5 runes. page.url, page.params, page.route, page.status, page.error, page.data, page.form, page.state. navigating.from, navigating.to, navigating.type, navigating.willUnload, navigating.delta, navigating.complete. updated.current. Works inside or outside <script> blocks. Companion to sveltekit-anti-patterns rule entry #22."
+globs: "src/routes/**/*.{ts,js,svelte},src/lib/**/*.{ts,js,svelte}"
+alwaysApply: false
+---
+
+# SvelteKit `$app/state`
+
+Cursor: `@sveltejs/kit` 2.12 introduced `$app/state` as a runes-aware replacement for `$app/stores`. The Svelte 4 store form (`$page`) still works for backward compatibility but is no longer the documented shape. Target: `@sveltejs/kit ^2.60.1`.
+
+The companion `sveltekit-anti-patterns` rule rejects `$app/stores` in new code (entry #22). This rule explains the positive form.
+
+## `page` from `$app/state`
+
+`page` is a reactive object. Read fields directly; Svelte 5 tracks them.
+
+```svelte
+<script lang="ts">
+  import { page } from '$app/state'
+</script>
+
+<p>Path: {page.url.pathname}</p>
+<p>Search: {page.url.searchParams.get('q')}</p>
+<p>Slug: {page.params.slug}</p>
+<p>Route id: {page.route.id}</p>
+<p>Status: {page.status}</p>
+{#if page.error}<pre>{page.error.message}</pre>{/if}
+```
+
+`page.data` is the merged `load` data (same as the `data` prop, but accessible from layouts and nested components).
+
+`page.form` is the most recent form action result.
+
+`page.state` is the shallow-routing state (set via `pushState` / `replaceState`).
+
+## `navigating` from `$app/state`
+
+`navigating` is a reactive object whose fields are `null` when no navigation is in progress (and during server rendering). The object itself is always truthy, so `{#if navigating}` is NOT a valid "is navigating" check. Guard on `navigating.type` instead.
+
+```svelte
+<script lang="ts">
+  import { navigating } from '$app/state'
+</script>
+
+{#if navigating.type}
+  <progress />
+  <p>From {navigating.from?.url.pathname} to {navigating.to?.url.pathname}</p>
+{/if}
+```
+
+Fields:
+
+- `navigating.from` - the URL we are navigating from
+- `navigating.to` - the URL we are navigating to
+- `navigating.type` - `'enter' | 'leave' | 'link' | 'goto' | 'popstate' | 'form' | null`
+- `navigating.willUnload` - true if leaving the app
+- `navigating.delta` - browser history delta for `popstate`
+- `navigating.complete` - a promise that resolves when the navigation finishes
+
+## `updated` from `$app/state`
+
+Tracks whether a new app version has been deployed (uses the version polling configured in `kit.version`).
+
+```svelte
+<script lang="ts">
+  import { updated } from '$app/state'
+</script>
+
+{#if updated.current}
+  <button onclick={() => location.reload()}>New version available - reload</button>
+{/if}
+```
+
+## Use anywhere
+
+`$app/state` reads work in `<script>`, in template, in `.svelte.ts` modules, and in callbacks. There is no need to subscribe / unsubscribe.
+
+```svelte
+<script lang="ts">
+  import { page } from '$app/state'
+  import { goto } from '$app/navigation'
+
+  function searchAgain() {
+    const q = page.url.searchParams.get('q')
+    if (q) goto(`/search?q=${encodeURIComponent(q)}&again=1`)
+  }
+</script>
+```
+
+## Migration cheat sheet
+
+| `$app/stores` (Svelte 4 form)        | `$app/state` (Svelte 5 form)         |
+| ------------------------------------- | ------------------------------------- |
+| `$page.url.pathname`                  | `page.url.pathname`                   |
+| `$page.params.slug`                   | `page.params.slug`                    |
+| `$page.data`                          | `page.data`                           |
+| `$page.error`                         | `page.error`                          |
+| `$page.form`                          | `page.form`                           |
+| `$navigating?.to.url.pathname`        | `navigating.to?.url.pathname`         |
+| `$updated`                            | `updated.current`                     |
+
+## Why these matter for LLM output
+
+Pre-2025 trained models will produce `import { page } from '$app/stores'` and `$page.url.pathname`. The `$app/stores` form still works but is deprecated for new code as of 2.12 and prints a console warning in dev (anti-pattern #22).

@@ -1,0 +1,33 @@
+{
+  "name": "roninforge-sveltekit",
+  "version": "1.0.0",
+  "description": "SvelteKit 2 + Svelte 5 (Runes) rules for Cursor. Pinned to svelte ^5.55.7, @sveltejs/kit ^2.60.1, vite ^8.0.13, typescript ^6.0.3, vitest ^4.1.6, @testing-library/svelte ^5.3.1, @playwright/test ^1.60.0, tailwindcss ^4.3.0, bits-ui ^2.18.1, @lucide/svelte ^1.16.0, sveltekit-superforms ^2.30.1, formsnap ^2.0.1, zod ^4.4.3, @sveltejs/enhanced-img ^0.10.4, mode-watcher ^1.1.0, runed ^0.37.1. Leads with the Svelte 5 Runes that LLMs trained on Svelte 4 do not know ($state, $derived, $effect, $props, $bindable, $host, $inspect, $props.id()), the snippets-replace-slots model, callback-prop event handling that replaces createEventDispatcher, .svelte.ts state modules that replace writable() stores, the SvelteKit 2 no-throw error/redirect API, mandatory cookies path, and the $app/state replacement for $app/stores in 2.12+. Catches 40 LLM regressions including let count = 0 without $state, $: reactive statements in runes mode, export let, on:click event directives, event modifiers, createEventDispatcher, <slot>, new App({ target }), bind:this to non-state, destructured $state losing reactivity, $effect setting state to derive, $effect infinite loops, $state for huge arrays without $state.raw, throw error/redirect in SvelteKit 2, cookies.set without path, top-level unawaited promises in load, goto external, $page from $app/stores, resolvePath, use:enhance form/data renamed to formElement/formData, missing enctype on file forms, paths.relative default flip, $env/dynamic during prerender, writable() for component state, lucide-svelte instead of @lucide/svelte, melt-ui instead of bits-ui, Felte forms, raw <img> over <enhanced:img>, CustomEvent typed payloads, withDefaults-style prop defaults, manual ARIA IDs over $props.id(), {@render children} with <slot>, mutating non-$bindable props, +page.ts without satisfies PageLoad, mount(App) for tests.",
+  "author": {
+    "name": "RoninForge",
+    "url": "https://roninforge.org"
+  },
+  "homepage": "https://github.com/RoninForge/roninforge-sveltekit",
+  "repository": "https://github.com/RoninForge/roninforge-sveltekit",
+  "license": "MIT",
+  "categories": [
+    "framework",
+    "svelte",
+    "sveltekit",
+    "typescript"
+  ],
+  "keywords": [
+    "svelte",
+    "svelte-5",
+    "runes",
+    "sveltekit",
+    "sveltekit-2",
+    "vite",
+    "typescript",
+    "vitest",
+    "playwright",
+    "tailwindcss",
+    "bits-ui",
+    "sveltekit-superforms",
+    "anti-patterns"
+  ]
+}
